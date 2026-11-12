@@ -1,0 +1,315 @@
+{
+  "name": "sports-betting-v3",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "id": "a1000000-0000-0000-0000-000000000001",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.api-sport.ru/v2/football/matches?date={{ $now.toFormat('yyyy-MM-dd') }}&page_size=500",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "ВСТАВЬТЕ_КЛЮЧ_API_SPORT"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [220, 0],
+      "id": "a1000000-0000-0000-0000-000000000002",
+      "name": "Матчи на сегодня"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst allMatches = Array.isArray(body) ? body : (body.matches || []);\n\nif (allMatches.length === 0) {\n  return [{ json: { error: 'Нет матчей от API' } }];\n}\n\nconst countries = ['Россия', 'Англия', 'Испания', 'Италия', 'Германия', 'Франция'];\nconst now = Date.now();\nconst in48h = now + 48 * 60 * 60 * 1000;\n\nconst filtered = allMatches.filter(m => {\n  const country = m.tournament?.category?.name || '';\n  const ts = m.startTimestamp || (m.dateEvent ? Date.parse(m.dateEvent) : NaN);\n  return m.status === 'notstarted'\n    && countries.includes(country)\n    && Number.isFinite(ts) && ts >= now && ts <= in48h;\n});\n\nif (filtered.length === 0) {\n  return [{ json: { error: 'Нет предстоящих матчей в топ-лигах в ближайшие 48 часов' } }];\n}\n\nreturn filtered\n  .sort((a, b) => (a.startTimestamp || 0) - (b.startTimestamp || 0))\n  .slice(0, 5)\n  .map(m => ({\n    json: {\n      gameId: m.id,\n      homeTeam: m.homeTeam?.name || 'Неизвестно',\n      awayTeam: m.awayTeam?.name || 'Неизвестно',\n      matchTime: new Date(m.startTimestamp).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),\n      leagueName: m.tournament?.name || 'Неизвестная лига',\n      country: m.tournament?.category?.name || '',\n      oddsBase: m.oddsBase || []\n    }\n  }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "id": "a1000000-0000-0000-0000-000000000003",
+      "name": "Фильтр матчей"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.api-sport.ru/v2/football/matches/{{ $json.gameId }}?with_pregame=true",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "ВСТАВЬТЕ_КЛЮЧ_API_SPORT"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [660, 0],
+      "id": "a1000000-0000-0000-0000-000000000004",
+      "name": "Краткая статистика"
+    },
+    {
+      "parameters": {
+        "jsCode": "const filtrItems = $('Фильтр матчей').all();\nconst statsItems = $('Краткая статистика').all();\n\nif (filtrItems.length === 0 || filtrItems[0].json.error) {\n  return [{ json: { error: 'Нет матчей для анализа' } }];\n}\n\nfunction extract1x2(oddsBase) {\n  const market = (oddsBase || []).find(m =>\n    /1X2/i.test(m.group || '') || /1X2|full time/i.test(m.name || ''));\n  if (!market || !Array.isArray(market.choices)) return null;\n  const out = {};\n  market.choices.forEach(c => { out[c.name] = c.decimal ?? c.value ?? '?'; });\n  return out;\n}\n\nconst lines = [];\nconst limit = Math.min(filtrItems.length, 5);\n\nfor (let i = 0; i < limit; i++) {\n  const base = filtrItems[i].json;\n  const details = statsItems[i]?.json || {};\n  const c = extract1x2(base.oddsBase) || {};\n\n  const missing = (details.homeTeam?.lineup?.missingPlayers || []).length\n    + (details.awayTeam?.lineup?.missingPlayers || []).length;\n\n  const form = details.pregame?.form || {};\n  const h2h = details.pregame?.h2h || {};\n\n  lines.push(\n    'Матч ' + (i + 1) + ': ' + base.homeTeam + ' vs ' + base.awayTeam\n    + ' (' + base.leagueName + ', ' + base.country + ', начало ' + base.matchTime + ').'\n    + ' Кэфы 1X2: П1=' + (c['1'] ?? '?') + ', Х=' + (c['X'] ?? '?') + ', П2=' + (c['2'] ?? '?') + '.'\n    + ' Форма: ' + JSON.stringify(form).slice(0, 400) + '.'\n    + ' H2H: ' + JSON.stringify(h2h).slice(0, 300) + '.'\n    + ' Вне игры/травмы: ' + missing + '.'\n  );\n}\n\nconst selectionPrompt = [\n  'Ты спортивный аналитик. Вот ' + lines.length + ' матча:',\n  lines.join('\\n'),\n  '',\n  'ТВОЯ ЗАДАЧА:',\n  'Выбери ОДИН лучший матч для анализа. Если данные слабые, напиши ТОЛЬКО: НЕТ ПОДХОДЯЩИХ МАТЧЕЙ',\n  'Отвечай СТРОГО на русском языке.',\n  'Последней строкой ответа напиши ТОЧНО в формате: Лучший матч: N  (где N — номер матча из списка).'\n].join('\\n');\n\nreturn [{ json: { raw_data_for_qwen: selectionPrompt } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0],
+      "id": "a1000000-0000-0000-0000-000000000005",
+      "name": "Сборка промпта"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.11.199:11434/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    model: \"qwen3.5:4b\",\n    stream: false,\n    think: false,\n    options: {\n      temperature: 0.1,\n      num_predict: 500\n    },\n    messages: [\n      {\n        role: \"system\",\n        content: \"Ты профессиональный спортивный аналитик. Отвечай СТРОГО на русском языке. Проанализируй данные и выбери ОДИН лучший матч. Если данных нет или они слабые, напиши ТОЛЬКО: 'НЕТ ПОДХОДЯЩИХ МАТЧЕЙ'. Последней строкой обязательно укажи: 'Лучший матч: N'.\"\n      },\n      {\n        role: \"user\",\n        content: $json.raw_data_for_qwen\n      }\n    ]\n  }\n}}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1100, 0],
+      "id": "a1000000-0000-0000-0000-000000000006",
+      "name": "qwen3.5:4b"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-0000-0000-000000000001",
+              "leftValue": "={{ $json.message?.content || '' }}",
+              "rightValue": "НЕТ ПОДХОДЯЩИХ МАТЧЕЙ",
+              "operator": {
+                "type": "string",
+                "operation": "contains",
+                "name": "filter.operator.contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1320, 0],
+      "id": "a1000000-0000-0000-0000-000000000007",
+      "name": "Если нет матчей"
+    },
+    {
+      "parameters": {
+        "jsCode": "const qwenResp = $('qwen3.5:4b').first().json;\nconst qwenText = qwenResp.message?.content || qwenResp.choices?.[0]?.message?.content || '';\n\nconst m = qwenText.match(/(?:лучший матч|матч)\\s*[:№]?\\s*(\\d{1,2})/i);\nif (!m) {\n  return [{ json: { error: 'Не удалось определить номер матча', qwenText: qwenText.slice(0, 500) } }];\n}\n\nconst selectedIndex = parseInt(m[1], 10) - 1;\nconst filtrItems = $('Фильтр матчей').all();\n\nif (selectedIndex < 0 || selectedIndex >= filtrItems.length) {\n  return [{ json: { error: 'Номер матча вне диапазона', selectedIndex: selectedIndex + 1 } }];\n}\n\nreturn [{ json: { gameId: filtrItems[selectedIndex].json.gameId } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 200],
+      "id": "a1000000-0000-0000-0000-000000000008",
+      "name": "Извлечение матча"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.api-sport.ru/v2/football/matches/{{ $json.gameId }}?with_pregame=true&with_bk_odds=true",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "ВСТАВЬТЕ_КЛЮЧ_API_SPORT"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1760, 200],
+      "id": "a1000000-0000-0000-0000-000000000009",
+      "name": "Детали матча"
+    },
+    {
+      "parameters": {
+        "jsCode": "const details = $input.first().json;\nconst home = details.homeTeam || {};\nconst away = details.awayTeam || {};\nconst oddsBase = details.oddsBase || [];\nconst oddsBk = details.oddsBk || {};\nconst pregame = details.pregame || {};\nconst missingHome = home.lineup?.missingPlayers || [];\nconst missingAway = away.lineup?.missingPlayers || [];\n\nfunction formatMarket(market) {\n  const choices = (market.choices || [])\n    .map(c => c.name + '@' + (c.decimal ?? c.value ?? '?'))\n    .join(', ');\n  return 'Рынок: ' + market.name + ' (' + (market.group || 'общий') + ') | Выборы: ' + choices;\n}\n\nconst baseMarkets = oddsBase.map(formatMarket).join('\\n');\n\nlet bkMarkets = '';\nif (oddsBk && typeof oddsBk === 'object') {\n  const bkParts = [];\n  for (const [bookmaker, data] of Object.entries(oddsBk)) {\n    if (data && Array.isArray(data.markets)) {\n      bkParts.push('--- ' + bookmaker.toUpperCase() + ' ---');\n      bkParts.push(data.markets.map(formatMarket).join('\\n'));\n    }\n  }\n  bkMarkets = bkParts.join('\\n');\n}\n\nconst referee = details.referee;\nconst refereeText = referee\n  ? 'Судья: ' + referee.name + '. Карточек за матч: ' + (referee.cardsPerMatch ?? referee.yellowCards ?? 'н/д')\n  : 'Судья: нет данных';\n\nconst prompt = [\n  'Детальный анализ матча: ' + (home.name || '?') + ' vs ' + (away.name || '?'),\n  '',\n  'КОЭФФИЦИЕНТЫ (базовые):',\n  baseMarkets || 'Нет данных',\n  '',\n  'РАСШИРЕННЫЕ РЫНКИ (букмекеры):',\n  bkMarkets || 'Нет данных',\n  '',\n  'ФОРМА ХОЗЯЕВ:',\n  JSON.stringify(pregame.form?.homeTeam || pregame.form || {}),\n  '',\n  'ФОРМА ГОСТЕЙ:',\n  JSON.stringify(pregame.form?.awayTeam || {}),\n  '',\n  'ОЧНЫЕ ВСТРЕЧИ:',\n  JSON.stringify(pregame.h2h || {}),\n  '',\n  'СЕРИИ КОМАНД:',\n  JSON.stringify(pregame.teamStreaks || {}),\n  '',\n  'ТРАВМЫ ХОЗЯЕВ: ' + (missingHome.map(p => p.player?.name).join(', ') || 'нет'),\n  'ТРАВМЫ ГОСТЕЙ: ' + (missingAway.map(p => p.player?.name).join(', ') || 'нет'),\n  '',\n  refereeText,\n  '',\n  'Твоя задача:',\n  '1. Проанализируй все доступные рынки.',\n  '2. Выбери три самых перспективных рынка (исход, тотал, фора, обе забьют, карточки и т.д.).',\n  '3. Для каждого укажи: Рынок: [название] | Прогноз: [значение] | Уверенность: [X]/10 | Обоснование: [одно предложение].',\n  '4. Отвечай СТРОГО на русском языке.',\n  '5. Не делай сложных математических вычислений.'\n].join('\\n');\n\nreturn [{ json: { raw_data_for_deepseek: prompt } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, 200],
+      "id": "a1000000-0000-0000-0000-00000000000a",
+      "name": "Подготовка для DeepSeek"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://routerai.ru/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ВСТАВЬТЕ_КЛЮЧ_ROUTERAI"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    model: \"deepseek/deepseek-v4.1-flash\",\n    messages: [\n      {\n        role: \"system\",\n        content: \"Ты — элитный аналитик. ЖЕСТКИЕ ПРАВИЛА: 1. НЕ делай сложных математических вычислений (Пуассон, факториалы, экспоненты). 2. Анализируй данные ТОЛЬКО на основе предоставленных цифр и процентов. 3. Ограничь свои внутренние рассуждения до 500 токенов. 4. ОБЯЗАТЕЛЬНО заверши ответ финальным прогнозом в формате: 'Матч: [Команда1] - [Команда2] | Рынок: [рынок] | Прогноз: [значение] | Уверенность: [X]/10 | Обоснование: [одно предложение]'. 5. Отвечай ТОЛЬКО на русском. 6. Если данных нет, напиши: '⚠️ Пропуск: Недостаточно данных'.\"\n      },\n      {\n        role: \"user\",\n        content: $json.raw_data_for_deepseek\n      }\n    ],\n    temperature: 0.1,\n    max_tokens: 4000\n  }\n}}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [2200, 200],
+      "id": "a1000000-0000-0000-0000-00000000000b",
+      "name": "DeepSeek API"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\n\nconst aiText = raw.choices?.[0]?.message?.content\n  || raw.message?.content\n  || raw.output\n  || raw.text\n  || (raw.error ? 'ОШИБКА API: ' + JSON.stringify(raw.error) : 'Структура ответа неизвестна: ' + JSON.stringify(raw).slice(0, 500));\n\nreturn [{\n  json: {\n    'СТАТУС': '✅ Готово',\n    'ПРОГНОЗ': aiText\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 200],
+      "id": "a1000000-0000-0000-0000-00000000000c",
+      "name": "Финальный ответ"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          { "node": "Матчи на сегодня", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Матчи на сегодня": {
+      "main": [
+        [
+          { "node": "Фильтр матчей", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Фильтр матчей": {
+      "main": [
+        [
+          { "node": "Краткая статистика", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Краткая статистика": {
+      "main": [
+        [
+          { "node": "Сборка промпта", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Сборка промпта": {
+      "main": [
+        [
+          { "node": "qwen3.5:4b", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "qwen3.5:4b": {
+      "main": [
+        [
+          { "node": "Если нет матчей", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Если нет матчей": {
+      "main": [
+        [],
+        [
+          { "node": "Извлечение матча", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Извлечение матча": {
+      "main": [
+        [
+          { "node": "Детали матча", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Детали матча": {
+      "main": [
+        [
+          { "node": "Подготовка для DeepSeek", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Подготовка для DeepSeek": {
+      "main": [
+        [
+          { "node": "DeepSeek API", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "DeepSeek API": {
+      "main": [
+        [
+          { "node": "Финальный ответ", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "f25b3d02f4215bb005ba93b4d9c1e893daf7f98110c4a6d3717cc6d68d4b0f70"
+  },
+  "tags": []
+}
